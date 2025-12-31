@@ -1,0 +1,6 @@
+mcp
+google-cloud-storage
+python-dotenv
+uvicorn
+starlette
+google-genai
