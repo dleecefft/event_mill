@@ -249,7 +249,39 @@ Default mode - runs as a subprocess communicating via standard input/output.
 python server.py
 ```
 
-### 2. Google Cloud Run (SSE Mode)
+### 2. Docker with ttyd Web Terminal
+Run Event Mill as a web-accessible terminal using [ttyd](https://github.com/tsl0922/ttyd).
+
+```bash
+# Set environment variables
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+export GEMINI_API_KEY=your-gemini-api-key
+export GCS_LOG_BUCKET=your-log-bucket  # Optional
+export TTYD_USERNAME=admin             # Optional, for basic auth
+export TTYD_PASSWORD=changeme          # Optional, for basic auth
+
+# Build and run
+docker-compose up --build
+```
+
+Access the terminal at `http://localhost:7681`
+
+**Important: UID Matching**
+
+The Docker container runs as a non-privileged user. The UID specified in `docker-compose.yml` must match the OS UID of the user that owns your service account JSON key file:
+
+```bash
+# Check the UID of your key file owner
+ls -n /path/to/service-account.json
+# Example output: -rw------- 1 1002 1002 2358 Dec 29 17:58 service-account.json
+
+# Update docker-compose.yml to match (default is 1000:1000)
+user: "1002:1002"
+```
+
+If the UIDs don't match, the container won't be able to read the mounted credentials file.
+
+### 3. Google Cloud Run (SSE Mode)
 Deploy as a standalone HTTP service:
 
 ```bash

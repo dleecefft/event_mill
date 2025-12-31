@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  event-mill:
+    build: .
+    container_name: event-mill-ttyd
+    ports:
+      - "7681:7681"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GCS_LOG_BUCKET=${GCS_LOG_BUCKET:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/sa-key.json
+      - TTYD_USERNAME=${TTYD_USERNAME:-admin}
+      - TTYD_PASSWORD=${TTYD_PASSWORD:-changeme}
+    volumes:
+      # Mount service account key from local GOOGLE_APPLICATION_CREDENTIALS path (read-only)
+      - ${GOOGLE_APPLICATION_CREDENTIALS}:/app/credentials/sa-key.json:ro
+    # Run as non-privileged user (matches Dockerfile USER)
+    user: "1002:1002"
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    # Read-only root filesystem (optional, uncomment if desired)
+    # read_only: true
+    # tmpfs:
+    #   - /tmp
+    restart: unless-stopped
