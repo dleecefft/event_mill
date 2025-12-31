@@ -3,7 +3,15 @@ System Context Module for SOC Log Analysis MCP Server
 
 This module provides shared system context and prompts that help the AI understand
 its role as a log analysis tool working with exported digital event records.
+
+Includes analysis history tracking to provide context across multiple queries.
 """
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import List, Dict, Optional
+from collections import deque
+import json
 
 # Core system identity and understanding
 SYSTEM_IDENTITY = """
@@ -42,7 +50,7 @@ LIMITATIONS:
 # Prompt for pattern discovery and log analysis
 PATTERN_ANALYSIS_PROMPT = """
 {system_identity}
-
+{session_context}
 CURRENT TASK:
 You are a Tier 3 SOC Analyst reviewing exported log data. Analyze the following log pattern summary from a file named '{file_name}'.
 
@@ -50,6 +58,7 @@ IMPORTANT: This is EXPORTED log data stored in GCS, not a live system. Your anal
 - Identify what type of system originally generated these logs
 - Assess security relevance of the patterns found
 - Recommend next steps for the human analyst to investigate
+- Consider any previous analyses from this session when making recommendations
 
 SUMMARY DATA:
 {summary_text}
@@ -74,7 +83,7 @@ Keep your response concise and action-oriented.
 # Prompt for conversational SOC assistant
 CONVERSATIONAL_ASSISTANT_PROMPT = """
 {system_identity}
-
+{session_context}
 CURRENT CONTEXT:
 You are assisting a SOC analyst who is investigating exported log files stored in Google Cloud Storage.
 
@@ -142,7 +151,7 @@ Respond ONLY with the JSON format above. No additional text.
 # Prompt for final analysis summary
 FINAL_ANALYSIS_PROMPT = """
 {system_identity}
-
+{session_context}
 ANALYST REQUEST: "{user_input}"
 
 ANALYSIS PLAN: {analysis_plan}
@@ -175,29 +184,244 @@ Format as a professional security analyst report.
 """
 
 # Helper function to format prompts
-def get_pattern_analysis_prompt(file_name: str, summary_text: str) -> str:
-    """Get the formatted pattern analysis prompt"""
+def get_pattern_analysis_prompt(file_name: str, summary_text: str, include_history: bool = True) -> str:
+    """Get the formatted pattern analysis prompt with optional session history."""
+    session_context = get_context_for_prompt() if include_history else ""
     return PATTERN_ANALYSIS_PROMPT.format(
         system_identity=SYSTEM_IDENTITY,
+        session_context=session_context,
         file_name=file_name,
         summary_text=summary_text
     )
 
-def get_conversational_prompt(user_input: str, available_files: str, tool_descriptions: str) -> str:
-    """Get the formatted conversational assistant prompt"""
+def get_conversational_prompt(user_input: str, available_files: str, tool_descriptions: str, include_history: bool = True) -> str:
+    """Get the formatted conversational assistant prompt with optional session history."""
+    session_context = get_context_for_prompt() if include_history else ""
     return CONVERSATIONAL_ASSISTANT_PROMPT.format(
         system_identity=SYSTEM_IDENTITY,
+        session_context=session_context,
         user_input=user_input,
         available_files=available_files,
         tool_descriptions=tool_descriptions
     )
 
-def get_final_analysis_prompt(user_input: str, analysis_plan: str, tool_results: str, threat_intel: str) -> str:
-    """Get the formatted final analysis prompt"""
+def get_final_analysis_prompt(user_input: str, analysis_plan: str, tool_results: str, threat_intel: str, include_history: bool = True) -> str:
+    """Get the formatted final analysis prompt with optional session history."""
+    session_context = get_context_for_prompt() if include_history else ""
     return FINAL_ANALYSIS_PROMPT.format(
         system_identity=SYSTEM_IDENTITY,
+        session_context=session_context,
         user_input=user_input,
         analysis_plan=analysis_plan,
         tool_results=tool_results,
         threat_intel=threat_intel
     )
+
+
+# =============================================================================
+# ANALYSIS HISTORY TRACKING
+# =============================================================================
+
+@dataclass
+class AnalysisRecord:
+    """A single analysis event record."""
+    timestamp: str
+    file_name: str
+    bucket_name: str
+    analysis_type: str  # scan, analyze, investigate, search, templates
+    query: str  # The pattern, search term, or command used
+    summary: str  # Brief summary of findings
+    key_findings: List[str] = field(default_factory=list)  # Top findings/IOCs
+    record_count: int = 0  # Number of records/lines analyzed
+    
+    def to_dict(self) -> Dict:
+        return {
+            "timestamp": self.timestamp,
+            "file": self.file_name,
+            "bucket": self.bucket_name,
+            "type": self.analysis_type,
+            "query": self.query,
+            "summary": self.summary,
+            "key_findings": self.key_findings,
+            "records": self.record_count
+        }
+    
+    def to_context_string(self) -> str:
+        """Format for inclusion in LLM context."""
+        findings = ", ".join(self.key_findings[:5]) if self.key_findings else "None noted"
+        return f"[{self.timestamp}] {self.analysis_type.upper()} on {self.file_name}: {self.summary} | Key findings: {findings}"
+
+
+class AnalysisHistory:
+    """
+    Tracks history of event record analyses for context continuity.
+    
+    Maintains a rolling window of recent analyses to provide context
+    to the LLM for follow-up questions and correlation.
+    """
+    
+    def __init__(self, max_records: int = 20):
+        self._history: deque = deque(maxlen=max_records)
+        self._files_analyzed: Dict[str, List[str]] = {}  # file -> list of analysis types
+        self._iocs_found: Dict[str, List[str]] = {}  # IOC type -> values (IPs, users, etc.)
+    
+    def add_record(self, record: AnalysisRecord) -> None:
+        """Add an analysis record to history."""
+        self._history.append(record)
+        
+        # Track files analyzed
+        if record.file_name not in self._files_analyzed:
+            self._files_analyzed[record.file_name] = []
+        if record.analysis_type not in self._files_analyzed[record.file_name]:
+            self._files_analyzed[record.file_name].append(record.analysis_type)
+    
+    def add_ioc(self, ioc_type: str, value: str) -> None:
+        """Track an indicator of compromise found during analysis."""
+        if ioc_type not in self._iocs_found:
+            self._iocs_found[ioc_type] = []
+        if value not in self._iocs_found[ioc_type]:
+            self._iocs_found[ioc_type].append(value)
+            # Keep IOC lists manageable
+            if len(self._iocs_found[ioc_type]) > 50:
+                self._iocs_found[ioc_type] = self._iocs_found[ioc_type][-50:]
+    
+    def add_iocs(self, ioc_type: str, values: List[str]) -> None:
+        """Track multiple IOCs of the same type."""
+        for value in values:
+            self.add_ioc(ioc_type, value)
+    
+    def get_recent_records(self, limit: int = 10) -> List[AnalysisRecord]:
+        """Get the most recent analysis records."""
+        return list(self._history)[-limit:]
+    
+    def get_context_summary(self, max_records: int = 10) -> str:
+        """
+        Generate a context summary for LLM prompts.
+        
+        Returns a formatted string summarizing recent analyses
+        that can be injected into prompts.
+        """
+        if not self._history:
+            return "No previous analyses in this session."
+        
+        lines = ["PREVIOUS ANALYSES IN THIS SESSION:"]
+        
+        # Recent analysis records
+        recent = self.get_recent_records(max_records)
+        for record in recent:
+            lines.append(f"  - {record.to_context_string()}")
+        
+        # Files analyzed summary
+        if self._files_analyzed:
+            lines.append("\nFILES ANALYZED:")
+            for file_name, types in list(self._files_analyzed.items())[-5:]:
+                lines.append(f"  - {file_name}: {', '.join(types)}")
+        
+        # IOCs found
+        if self._iocs_found:
+            lines.append("\nIOCs IDENTIFIED:")
+            for ioc_type, values in self._iocs_found.items():
+                sample = values[:5]
+                more = f" (+{len(values)-5} more)" if len(values) > 5 else ""
+                lines.append(f"  - {ioc_type}: {', '.join(sample)}{more}")
+        
+        return "\n".join(lines)
+    
+    def get_file_history(self, file_name: str) -> List[AnalysisRecord]:
+        """Get all analyses performed on a specific file."""
+        return [r for r in self._history if r.file_name == file_name]
+    
+    def get_iocs(self, ioc_type: Optional[str] = None) -> Dict[str, List[str]]:
+        """Get tracked IOCs, optionally filtered by type."""
+        if ioc_type:
+            return {ioc_type: self._iocs_found.get(ioc_type, [])}
+        return self._iocs_found.copy()
+    
+    def clear(self) -> None:
+        """Clear all history."""
+        self._history.clear()
+        self._files_analyzed.clear()
+        self._iocs_found.clear()
+    
+    def to_json(self) -> str:
+        """Export history as JSON."""
+        return json.dumps({
+            "records": [r.to_dict() for r in self._history],
+            "files_analyzed": self._files_analyzed,
+            "iocs_found": self._iocs_found
+        }, indent=2)
+
+
+# Global analysis history instance
+_analysis_history = AnalysisHistory()
+
+
+def get_analysis_history() -> AnalysisHistory:
+    """Get the global analysis history instance."""
+    return _analysis_history
+
+
+def record_analysis(
+    file_name: str,
+    bucket_name: str,
+    analysis_type: str,
+    query: str,
+    summary: str,
+    key_findings: Optional[List[str]] = None,
+    record_count: int = 0,
+    iocs: Optional[Dict[str, List[str]]] = None
+) -> AnalysisRecord:
+    """
+    Convenience function to record an analysis and return the record.
+    
+    Args:
+        file_name: Name of the file analyzed
+        bucket_name: GCS bucket name
+        analysis_type: Type of analysis (scan, analyze, investigate, search, templates)
+        query: The pattern, search term, or command used
+        summary: Brief summary of findings
+        key_findings: List of key findings or IOCs
+        record_count: Number of records/lines analyzed
+        iocs: Dict of IOC type -> values to track
+    
+    Returns:
+        The created AnalysisRecord
+    """
+    record = AnalysisRecord(
+        timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        file_name=file_name,
+        bucket_name=bucket_name,
+        analysis_type=analysis_type,
+        query=query,
+        summary=summary,
+        key_findings=key_findings or [],
+        record_count=record_count
+    )
+    
+    _analysis_history.add_record(record)
+    
+    # Track IOCs if provided
+    if iocs:
+        for ioc_type, values in iocs.items():
+            _analysis_history.add_iocs(ioc_type, values)
+    
+    return record
+
+
+def get_context_for_prompt() -> str:
+    """
+    Get analysis history context formatted for inclusion in LLM prompts.
+    
+    Returns:
+        Formatted string with session history, or empty string if no history.
+    """
+    history = get_analysis_history()
+    if not history._history:
+        return ""
+    
+    return f"\n\n{history.get_context_summary()}\n"
+
+
+def clear_session_history() -> None:
+    """Clear the analysis history for a new session."""
+    _analysis_history.clear()
