@@ -1,0 +1,52 @@
+# Event Mill - Cloud Run Deployment with ttyd web terminal
+# Cloud Run provides HTTPS on port 443 automatically, routing to container's PORT (8080)
+
+FROM python:3.11-slim
+
+# Install ttyd from official release
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    ca-certificates \
+    && wget -qO /usr/local/bin/ttyd \
+       https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 \
+    && chmod +x /usr/local/bin/ttyd \
+    && apt-get purge -y wget \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-privileged user
+RUN groupadd --gid 1000 eventmill \
+    && useradd --uid 1000 --gid eventmill --shell /bin/bash --create-home eventmill
+
+WORKDIR /app
+
+# Install Python dependencies first (better layer caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY --chown=eventmill:eventmill . .
+
+# Create directory for secrets (Cloud Run mounts secrets here)
+RUN mkdir -p /app/credentials && chown eventmill:eventmill /app/credentials
+
+# Switch to non-privileged user
+USER eventmill
+
+# Cloud Run sets PORT env var (default 8080)
+# ttyd will listen on this port, Cloud Run proxies HTTPS:443 -> container:PORT
+ENV PORT=8080
+
+EXPOSE 8080
+
+# ttyd options:
+#   -W              = writable (allow input)
+#   -p $PORT        = listen on Cloud Run's PORT
+#   -t fontSize=16  = larger font for readability
+#   -c user:pass    = basic auth (optional, use with Secret Manager)
+#
+# For public access without auth (Cloud Run IAM handles access):
+CMD ["sh", "-c", "ttyd -W -p ${PORT} -t fontSize=16 python conversational_client.py"]
+
+# For basic auth (set TTYD_USERNAME and TTYD_PASSWORD as secrets):
+# CMD ["sh", "-c", "ttyd -W -p ${PORT} -c ${TTYD_USERNAME}:${TTYD_PASSWORD} -t fontSize=16 python conversational_client.py"]

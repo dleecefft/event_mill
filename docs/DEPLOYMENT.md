@@ -1,7 +1,15 @@
 # Event Mill Deployment Guide
 
 ## Overview
-Deploy the Event Mill MCP server on a standalone Linux server (VM) or Google Cloud Run.
+Deploy the Event Mill MCP server on a standalone Linux server (VM) or Google Cloud Run with ttyd web terminal.
+
+## Deployment Options
+
+| Method | Access | Best For |
+|--------|--------|----------|
+| Local Docker + ttyd | HTTP :7681 | Development, local testing |
+| Cloud Run + ttyd | HTTPS :443 | Production, team access |
+| VM + systemd | SSH | Traditional server deployment |
 
 ## Why Remote Server?
 - **API Key Authentication**: Gemini API works properly without Cloud Shell's GCP credential conflicts
@@ -199,3 +207,149 @@ python server.py
 - Monitor **Gemini API usage** in Google Cloud Console
 - Consider **caching** frequent analyses
 - Implement **rate limiting** if needed
+
+---
+
+## Cloud Run Deployment (ttyd Web Terminal)
+
+Deploy Event Mill as a web-accessible terminal via HTTPS on port 443.
+
+### Quick Deploy
+
+```bash
+# Set environment variables
+export GOOGLE_CLOUD_PROJECT=your-project-id
+export GEMINI_API_KEY=your-gemini-api-key
+export GCS_LOG_BUCKET=your-log-bucket  # Optional
+
+# Deploy
+./deploy-cloudrun.sh
+```
+
+### Manual Deployment
+
+#### 1. Build and Push Image
+
+```bash
+# Build using Cloud Build
+gcloud builds submit \
+    --project="${GOOGLE_CLOUD_PROJECT}" \
+    --tag="gcr.io/${GOOGLE_CLOUD_PROJECT}/event-mill" \
+    --dockerfile=Dockerfile.cloudrun \
+    .
+```
+
+#### 2. Deploy to Cloud Run
+
+```bash
+gcloud run deploy event-mill \
+    --project="${GOOGLE_CLOUD_PROJECT}" \
+    --region=us-central1 \
+    --image="gcr.io/${GOOGLE_CLOUD_PROJECT}/event-mill" \
+    --platform=managed \
+    --port=8080 \
+    --memory=512Mi \
+    --cpu=1 \
+    --timeout=3600 \
+    --concurrency=10 \
+    --min-instances=0 \
+    --max-instances=3 \
+    --set-env-vars="GEMINI_API_KEY=${GEMINI_API_KEY}" \
+    --set-env-vars="GCS_LOG_BUCKET=${GCS_LOG_BUCKET}" \
+    --allow-unauthenticated
+```
+
+#### 3. Access the Terminal
+
+Cloud Run provides HTTPS automatically:
+```
+https://event-mill-XXXXXX-uc.a.run.app
+```
+
+The ttyd terminal is accessible directly at this URL via your browser.
+
+### Cloud Run Configuration
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| Port | 8080 | Cloud Run routes HTTPS:443 → container:8080 |
+| Memory | 512Mi | Sufficient for log analysis |
+| CPU | 1 | Single CPU for terminal session |
+| Timeout | 3600s | 1 hour max session (Cloud Run limit) |
+| Concurrency | 10 | Multiple analyst sessions |
+| Min instances | 0 | Scale to zero when idle |
+| Max instances | 3 | Limit concurrent sessions |
+
+### Authentication Options
+
+#### Option 1: Public Access (IAM-controlled)
+```bash
+--allow-unauthenticated
+```
+Anyone with the URL can access. Use for internal/VPN-protected networks.
+
+#### Option 2: IAM Authentication
+```bash
+--no-allow-unauthenticated
+```
+Then grant access to specific users:
+```bash
+gcloud run services add-iam-policy-binding event-mill \
+    --region=us-central1 \
+    --member="user:analyst@example.com" \
+    --role="roles/run.invoker"
+```
+
+#### Option 3: Basic Auth (ttyd built-in)
+Update `Dockerfile.cloudrun` CMD to use auth:
+```dockerfile
+CMD ["sh", "-c", "ttyd -W -p ${PORT} -c ${TTYD_USERNAME}:${TTYD_PASSWORD} -t fontSize=16 python conversational_client.py"]
+```
+
+Then deploy with secrets:
+```bash
+# Create secrets
+echo -n "admin" | gcloud secrets create ttyd-username --data-file=-
+echo -n "your-secure-password" | gcloud secrets create ttyd-password --data-file=-
+
+# Deploy with secrets
+gcloud run deploy event-mill \
+    ... \
+    --set-secrets="TTYD_USERNAME=ttyd-username:latest,TTYD_PASSWORD=ttyd-password:latest"
+```
+
+### GCS Access from Cloud Run
+
+Cloud Run uses the service's identity to access GCS. Grant permissions:
+
+```bash
+# Get the Cloud Run service account
+SERVICE_ACCOUNT=$(gcloud run services describe event-mill \
+    --region=us-central1 \
+    --format="value(spec.template.spec.serviceAccountName)")
+
+# Grant GCS read access
+gcloud projects add-iam-policy-binding ${GOOGLE_CLOUD_PROJECT} \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/storage.objectViewer"
+```
+
+### CI/CD with Cloud Build
+
+Use `cloudbuild.yaml` for automated deployments:
+
+```bash
+# Trigger on git push
+gcloud builds triggers create github \
+    --repo-name=event-mill \
+    --repo-owner=your-org \
+    --branch-pattern="^main$" \
+    --build-config=cloudbuild.yaml
+```
+
+### Limitations
+
+- **Session timeout**: Cloud Run has a max timeout of 3600s (1 hour)
+- **Cold starts**: First request may take 5-10s if scaled to zero
+- **WebSocket**: ttyd uses WebSocket which Cloud Run supports
+- **No persistent storage**: Each session starts fresh
