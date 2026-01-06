@@ -74,8 +74,14 @@ echo "📦 Building container image..."
 gcloud builds submit \
     --project="${PROJECT_ID}" \
     --tag="${IMAGE_NAME}" \
-    --dockerfile=Dockerfile.cloudrun \
-    .
+    --config=/dev/stdin \
+    . <<EOF
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', '${IMAGE_NAME}', '-f', 'Dockerfile.cloudrun', '.']
+images:
+  - '${IMAGE_NAME}'
+EOF
 
 # =============================================================================
 # Step 4: Deploy to Cloud Run with secrets
