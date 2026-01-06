@@ -71,17 +71,20 @@ grant_secret_access "${SECRET_TTYD_CRED}"
 # =============================================================================
 echo ""
 echo "📦 Building container image..."
-gcloud builds submit \
-    --project="${PROJECT_ID}" \
-    --tag="${IMAGE_NAME}" \
-    --config=/dev/stdin \
-    . <<EOF
+
+# Create temporary cloudbuild config for custom Dockerfile
+cat > /tmp/cloudbuild-eventmill.yaml <<EOF
 steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['build', '-t', '${IMAGE_NAME}', '-f', 'Dockerfile.cloudrun', '.']
 images:
   - '${IMAGE_NAME}'
 EOF
+
+gcloud builds submit \
+    --project="${PROJECT_ID}" \
+    --config=/tmp/cloudbuild-eventmill.yaml \
+    .
 
 # =============================================================================
 # Step 4: Deploy to Cloud Run with secrets
